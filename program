@@ -1,0 +1,156 @@
+import RPi.GPIO as IO
+import numpy as np
+import time
+import rpi
+import cloud4rpi
+IO.setwarnings(False)
+IO.setmode (IO.BCM)
+
+# Put your device token here. To get the token,
+# sign up at https://cloud4rpi.io and create a device.
+DEVICE_TOKEN = '64H4Acp3vAMzyP1bvX2vXnvs4'
+
+# Put variable declarations here
+    # Available types: 'bool', 'numeric', 'string', 'location'
+    variables = {
+        'current level': {
+            'type': 'numeric' if ds_sensors else 'string',
+            'bind': sensor_not_connected
+        },
+        'no_of_balls': {
+            'type': 'numeric' if ds_sensors else 'string',
+            'bind': sensor_not_connected
+        },
+        'refill_level_reached' : {
+            'type' : 'string'
+            'bind' : sensor_not_connected
+        },
+        'forecasted_time' : {
+            'type' : 'numeric'
+            'bind' : sensor_not_connected
+        }
+    }
+
+diagnostics = {
+        'CPU Temp': rpi.cpu_temp,
+        'IP Address': rpi.ip_address,
+        'Host': rpi.host_name,
+        'Operating System': rpi.os_name,
+        'Client Version:': cloud4rpi.__version__,
+    }
+
+device = cloud4rpi.connect(DEVICE_TOKEN)
+
+# Use the following 'device' declaration
+# to enable the MQTT traffic encryption (TLS).
+    
+tls = {
+         'ca_certs': '/etc/ssl/certs/ca-certificates.crt'
+   }
+
+device = cloud4rpi.connect(DEVICE_TOKEN, tls_config=tls)
+device.declare(variables)
+device.declare_diag(diagnostics)
+device.publish_config()
+
+# Adds a 1 second delay to ensure device variables are created
+sleep(1)
+
+
+TRIG = 23
+ECHO = 24
+
+#setup pins
+IO.setup(TRIG,IO.OUT)
+IO.setup(ECHO,IO.IN)
+IO.setup(14,IO.OUT)
+
+IO.output(TRIG,False)
+time.sleep(2)
+
+
+#initial ball quantity assuming given dimensions of the container
+const_balls = 10616
+balls = 10616
+no_balls_in_one_layer = 531
+initial_ht = 80
+initial_time = time.time()
+
+time = [0,30]
+quantity = [10616,10085]
+
+sum_t = 0
+sum_ts = 0
+sum_q = 0
+sum_qt = 0
+
+
+while 1:
+
+    for t in time:
+        sum_t+=t
+
+    for tq in time:
+        sum_ts+=tq*tq
+
+    for q in quantity:
+        sum_q+=q
+
+    for i,j in zip(time,quantity):
+        sum_qt+=i*j
+A = np.array([[10, sum_t], [sum_t, sum_ts]])
+    B = np.array([sum_q, sum_qt])
+    X = np.linalg.inv(A).dot(B)
+
+    a = X[0]
+    b= X[1]
+
+    # trigger sensor
+    IO.output(TRIG,True)
+    time.sleep(0.00001)
+    IO.output(TRIG,False)
+
+    while IO.input(ECHO) ==0:
+        pulse_start=time.time()
+    
+    while IO.input(ECHO) ==1:
+        pulse_end=time.time()
+
+    #calculation of height
+    pulse_duration = pulse_end-pulse_start
+    height = pulse_duration * 17150
+    height=round(distance,2)
+
+    #calculate level based on height
+    height_difference = abs(initial_ht - height)
+    no_of_layers = round(height_difference / 6 , 0)
+
+    if initial_ht < height:
+        no_of_balls = balls - no_balls_in_one_layer * no_of_layers
+    else:
+        no_of_balls = balls + no_balls_in_one_layer * no_of_layers
+
+    balls = no_of_balls
+
+    #alert the server to send notification for refilling
+    if balls < 1061:
+        IO.output(14,True)
+        device.publish_data({'refill_level_reached' : 'true'})
+        device.publish_data({'current_level' : no_of_layers})
+        device.publish_data({'no_of_balls' : balls})
+        device.publish_data({'forecasted_value' : 0})
+        
+
+    #new value added for forcasting
+    time.append((time.time() - initial_time)/60)
+    quantity.append(balls)
+
+    #update data on the server
+    device.publish_data({'no_of_balls' : balls})
+    device.publish_data({'current_level' : no_of_layers})
+    device.publish_data({'refill_level_reached' : false})
+ #forcasted time when value becomes 20%
+    forecasted_time = (((const_balls * 20 )/100) - a ) / b
+    device.publish_data({'forecsted_value' : forcasted_time})
+    print("Container needs to be refilled in " + forecasted_time + " minutes")
+    time.sleep(1800)
